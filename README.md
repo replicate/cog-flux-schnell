@@ -15,4 +15,4 @@ To run a prediction:
 
     cog predict -i prompt="a tiny astronaut hatching from an egg on the moon"
 
-![Output](output.png)
+![Output](output.0.png)
