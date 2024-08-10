@@ -51,8 +51,8 @@ class Predictor(BasePredictor):
 
         # Save some VRAM by offloading the model to CPU
         vram = int(torch.cuda.get_device_properties(0).total_memory/(1024*1024*1024))
-        if vram < 50:
-            print("GPU VRAM < 50Gb - Offloading model to CPU")
+        if vram < 40:
+            print("GPU VRAM < 40Gb - Offloading model to CPU")
             self.txt2img_pipe.enable_model_cpu_offload()
         
         print("setup took: ", time.time() - start)
