@@ -61,13 +61,15 @@ class Predictor(BasePredictor):
         self.txt2img_pipe = FluxPipeline.from_pretrained(
             MODEL_CACHE,
             torch_dtype=torch.bfloat16
-        ).to("cuda")
+        )
 
         # Save some VRAM by offloading the model to CPU
         vram = int(torch.cuda.get_device_properties(0).total_memory/(1024*1024*1024))
         if vram < 40:
             print("GPU VRAM < 40Gb - Offloading model to CPU")
-            self.txt2img_pipe.enable_model_cpu_offload()
+            self.txt2img_pipe.enable_sequential_cpu_offload()
+        else:
+            self.txt2img_pipe = self.txt2img_pipe.to("cuda")
         
         print("setup took: ", time.time() - start)
 
