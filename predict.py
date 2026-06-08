@@ -8,17 +8,60 @@ import torch
 import subprocess
 import numpy as np
 from typing import List
-from diffusers import FluxPipeline
-from transformers import CLIPImageProcessor
-from diffusers.pipelines.stable_diffusion.safety_checker import (
-    StableDiffusionSafetyChecker
-)
 
 MODEL_CACHE = "FLUX.1-schnell"
 MODEL_URL = "https://weights.replicate.delivery/default/black-forest-labs/FLUX.1-schnell/files.tar"
 SAFETY_CACHE = "safety-cache"
 FEATURE_EXTRACTOR = "/src/feature-extractor"
 SAFETY_URL = "https://weights.replicate.delivery/default/sdxl/safety-1.0.tar"
+COMPILE_CACHES = (
+    "/src/compile-cache/flux-schnell-regional-sm90-torch211-cu128-1x1.ptcache",
+    "/src/compile-cache/flux-schnell-regional-sm90-torch211-cu128-16x9.ptcache",
+)
+COMPILE_CACHE_LOADED = False
+
+
+def should_enable_regional_compile() -> bool:
+    if not torch.cuda.is_available():
+        return False
+    major, minor = torch.cuda.get_device_capability(0)
+    return major == 9 and minor == 0
+
+
+def load_sm90_compile_cache() -> None:
+    global COMPILE_CACHE_LOADED
+    if COMPILE_CACHE_LOADED:
+        return
+
+    if not should_enable_regional_compile():
+        if torch.cuda.is_available():
+            major, minor = torch.cuda.get_device_capability(0)
+            print(f"Skipping regional compile cache on compute capability {major}.{minor}")
+        else:
+            print("Skipping regional compile cache because CUDA is not available")
+        return
+
+    try:
+        start = time.time()
+        for cache_path in COMPILE_CACHES:
+            if not os.path.exists(cache_path):
+                print(f"Skipping regional compile cache; artifact not found at {cache_path}")
+                return
+            with open(cache_path, "rb") as cache_file:
+                torch.compiler.load_cache_artifacts(cache_file.read())
+        COMPILE_CACHE_LOADED = True
+        print("sm90 regional compile cache load took: ", time.time() - start)
+    except Exception as error:
+        print(f"Skipping regional compile cache after load error: {error}")
+
+
+load_sm90_compile_cache()
+
+from diffusers import FluxPipeline
+from transformers import CLIPImageProcessor
+from diffusers.pipelines.stable_diffusion.safety_checker import (
+    StableDiffusionSafetyChecker
+)
 
 ASPECT_RATIOS = {
     "1:1": (1024, 1024),
@@ -41,11 +84,32 @@ def download_weights(url, dest):
     subprocess.check_call(["pget", "-xf", url, dest], close_fds=False)
     print("downloading took: ", time.time() - start)
 
+
+def make_seed_generator(seed: int) -> torch.Generator:
+    # Keep seed expansion on CPU so identical seeds produce the same initial
+    # latents across H100 PCIe and SXM systems.
+    return torch.Generator(device="cpu").manual_seed(seed)
+
+
 class Predictor(BasePredictor):
+    def enable_sm90_regional_compile(self) -> None:
+        if not should_enable_regional_compile():
+            return
+
+        try:
+            start = time.time()
+            self.txt2img_pipe.transformer.compile_repeated_blocks(
+                mode="default", fullgraph=False
+            )
+            print("sm90 regional compile setup took: ", time.time() - start)
+        except Exception as error:
+            print(f"Skipping regional compile after setup error: {error}")
+
     def setup(self) -> None:
         """Load the model into memory to make running multiple predictions efficient"""
         start = time.time()
         # os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        load_sm90_compile_cache()
 
         print("Loading safety checker...")
         if not os.path.exists(SAFETY_CACHE):
@@ -68,6 +132,8 @@ class Predictor(BasePredictor):
         if vram < 40:
             print("GPU VRAM < 40Gb - Offloading model to CPU")
             self.txt2img_pipe.enable_model_cpu_offload()
+
+        self.enable_sm90_regional_compile()
         
         print("setup took: ", time.time() - start)
 
@@ -133,7 +199,7 @@ class Predictor(BasePredictor):
         flux_kwargs["height"] = height
         pipe = self.txt2img_pipe
 
-        generator = torch.Generator("cuda").manual_seed(seed)
+        generator = make_seed_generator(seed)
 
         common_args = {
             "prompt": [prompt] * num_outputs,
