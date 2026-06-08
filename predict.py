@@ -84,6 +84,13 @@ def download_weights(url, dest):
     subprocess.check_call(["pget", "-xf", url, dest], close_fds=False)
     print("downloading took: ", time.time() - start)
 
+
+def make_seed_generator(seed: int) -> torch.Generator:
+    # Keep seed expansion on CPU so identical seeds produce the same initial
+    # latents across H100 PCIe and SXM systems.
+    return torch.Generator(device="cpu").manual_seed(seed)
+
+
 class Predictor(BasePredictor):
     def enable_sm90_regional_compile(self) -> None:
         if not should_enable_regional_compile():
@@ -192,7 +199,7 @@ class Predictor(BasePredictor):
         flux_kwargs["height"] = height
         pipe = self.txt2img_pipe
 
-        generator = torch.Generator("cuda").manual_seed(seed)
+        generator = make_seed_generator(seed)
 
         common_args = {
             "prompt": [prompt] * num_outputs,
